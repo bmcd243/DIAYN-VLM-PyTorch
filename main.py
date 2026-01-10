@@ -1,9 +1,16 @@
-import gym
+# import gym
+import gymnasium as gym
 from Brain import SACAgent
 from Common import Play, Logger, get_params
 import numpy as np
 from tqdm import tqdm
-import mujoco_py
+import os
+import torch
+os.environ["MUJOCO_GL"] = "egl" 
+print("CUDA available:", torch.cuda.is_available())
+print("Device count:", torch.cuda.device_count())
+print("Current device:", torch.cuda.current_device())
+print("Device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")
 
 
 def concat_state_latent(s, z_, n):
@@ -27,7 +34,8 @@ if __name__ == "__main__":
     test_env.close()
     del test_env, n_states, n_actions, action_bounds
 
-    env = gym.make(params["env_name"])
+    # env = gym.make(params["env_name"])
+    env = gym.make(params["env_name"], render_mode="rgb_array")
 
     p_z = np.full(params["n_skills"], 1 / params["n_skills"])
     agent = SACAgent(p_z=p_z, **params)
@@ -50,15 +58,15 @@ if __name__ == "__main__":
             min_episode = 0
             last_logq_zs = 0
             np.random.seed(params["seed"])
-            env.seed(params["seed"])
-            env.observation_space.seed(params["seed"])
+            env.reset(seed=params["seed"])
             env.action_space.seed(params["seed"])
+            env.observation_space.seed(params["seed"])
             print("Training from scratch.")
 
         logger.on()
         for episode in tqdm(range(1 + min_episode, params["max_n_episodes"] + 1)):
             z = np.random.choice(params["n_skills"], p=p_z)
-            state = env.reset()
+            state, _ = env.reset()
             state = concat_state_latent(state, z, params["n_skills"])
             episode_reward = 0
             logq_zses = []
@@ -67,7 +75,8 @@ if __name__ == "__main__":
             for step in range(1, 1 + max_n_steps):
 
                 action = agent.choose_action(state)
-                next_state, reward, done, _ = env.step(action)
+                next_state, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
                 next_state = concat_state_latent(next_state, z, params["n_skills"])
                 agent.store(state, z, done, action, next_state)
                 logq_zs = agent.train()
@@ -86,9 +95,9 @@ if __name__ == "__main__":
                        sum(logq_zses) / len(logq_zses),
                        step,
                        np.random.get_state(),
-                       env.np_random.get_state(),
-                       env.observation_space.np_random.get_state(),
-                       env.action_space.np_random.get_state(),
+                    #    env.np_random.get_state(),
+                    #    env.observation_space.np_random.get_state(),
+                    #    env.action_space.np_random.get_state(),
                        *agent.get_rng_states(),
                        )
 
