@@ -10,6 +10,7 @@ from torch.nn.functional import log_softmax
 class SACAgent:
     def __init__(self,
                  p_z,
+                 skill_embeddings=None,
                  **config):
         self.config = config
         self.n_states = self.config["n_states"]
@@ -51,6 +52,8 @@ class SACAgent:
         self.q_value2_opt = Adam(self.q_value_network2.parameters(), lr=self.config["lr"])
         self.policy_opt = Adam(self.policy_network.parameters(), lr=self.config["lr"])
         self.discriminator_opt = Adam(self.discriminator.parameters(), lr=self.config["lr"])
+
+        self.skill_embeddings = torch.from_numpy(skill_embeddings).float().to(self.device)
 
     def choose_action(self, states):
         states = np.expand_dims(states, axis=0)

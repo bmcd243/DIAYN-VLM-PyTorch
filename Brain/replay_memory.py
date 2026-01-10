@@ -1,7 +1,7 @@
 import random
 from collections import namedtuple
 
-Transition = namedtuple('Transition', ('state', 'z', 'done', 'action', 'next_state'))
+Transition = namedtuple('Transition', ('state', 'z', 'done', 'action', 'next_state', 'vlm_emb'))
 
 
 class Memory:
@@ -11,8 +11,8 @@ class Memory:
         self.seed = seed
         random.seed(self.seed)
 
-    def add(self, *transition):
-        self.buffer.append(Transition(*transition))
+    def add(self, state, z, done, action, next_state, vlm_emb):
+        self.buffer.append(Transition(state, z, done, action, next_state, vlm_emb))
         if len(self.buffer) > self.buffer_size:
             self.buffer.pop(0)
         assert len(self.buffer) <= self.buffer_size
