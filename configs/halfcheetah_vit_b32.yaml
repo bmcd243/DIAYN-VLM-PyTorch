@@ -1,0 +1,30 @@
+# Fast training configuration with ViT-B/32
+# Optimized for quick experimentation
+
+env_name: "HalfCheetah-v5"
+seed: 123
+
+# Training
+do_train: true
+train_from_scratch: true
+max_n_episodes: 3000
+interval: 100
+
+# DIAYN
+n_skills: 20
+
+# SAC Hyperparameters
+lr: 0.0003
+batch_size: 512  # Larger batch for better GPU utilization
+mem_size: 1000000
+
+# CLIP Model
+clip_model: "ViT-B/32"
+embedding_dim: 512
+
+# Optimization
+embedding_freq: 4  # Compute embedding every 4 steps for 4x speedup
+
+# Logging
+use_wandb: true
+wandb_project: "DIAYN-VLM"

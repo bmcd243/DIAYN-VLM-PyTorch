@@ -10,7 +10,6 @@ from torch.nn.functional import log_softmax
 class SACAgent:
     def __init__(self,
                  p_z,
-                 skill_embeddings=None,
                  **config):
         self.config = config
         self.n_states = self.config["n_states"]
@@ -21,6 +20,12 @@ class SACAgent:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         torch.manual_seed(self.config["seed"])
+        # 1. Enable cuDNN autotuner for faster convolutions
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+
+        self.p_z_tensor = from_numpy(self.p_z).to(self.device)
+
         self.policy_network = PolicyNetwork(n_states=self.n_states + self.n_skills,
                                             n_actions=self.config["n_actions"],
                                             action_bounds=self.config["action_bounds"],
@@ -41,7 +46,8 @@ class SACAgent:
                                                  n_hidden_filters=self.config["n_hiddens"]).to(self.device)
         self.hard_update_target_network()
 
-        self.discriminator = Discriminator(n_states=512, n_skills=self.n_skills,
+        embedding_dim = self.config.get("embedding_dim", 768)  # Default to 768 for ViT-L/14
+        self.discriminator = Discriminator(n_states=embedding_dim, n_skills=self.n_skills,
                                            n_hidden_filters=self.config["n_hiddens"]).to(self.device)
 
         self.mse_loss = torch.nn.MSELoss()
@@ -53,7 +59,6 @@ class SACAgent:
         self.policy_opt = Adam(self.policy_network.parameters(), lr=self.config["lr"])
         self.discriminator_opt = Adam(self.discriminator.parameters(), lr=self.config["lr"])
 
-        self.skill_embeddings = torch.from_numpy(skill_embeddings).float().to(self.device)
 
     def choose_action(self, states):
         states = np.expand_dims(states, axis=0)
@@ -65,7 +70,7 @@ class SACAgent:
         state = from_numpy(state).float().to("cpu")
         z = torch.ByteTensor([z]).to("cpu")
         done = torch.BoolTensor([done]).to("cpu")
-        action = torch.Tensor([action]).to("cpu")
+        action = torch.from_numpy(action).unsqueeze(0).float().to("cpu")
         next_state = from_numpy(next_state).float().to("cpu")
         # Store embedding
         embedding = from_numpy(embedding).float().to("cpu")
@@ -81,7 +86,8 @@ class SACAgent:
         next_states = torch.cat(batch.next_state).view(self.batch_size, self.n_states + self.n_skills).to(self.device)
         
         # CHANGE: Unpack embeddings
-        embeddings = torch.cat(batch.embedding).view(self.batch_size, 512).to(self.device)
+        embedding_dim = batch.embedding[0].shape[0]
+        embeddings = torch.cat(batch.embedding).view(self.batch_size, embedding_dim).to(self.device)
 
         return states, zs, dones, actions, next_states, embeddings
 
@@ -91,14 +97,15 @@ class SACAgent:
         else:
             batch = self.memory.sample(self.batch_size)
             states, zs, dones, actions, next_states, embeddings = self.unpack(batch)
-            p_z = from_numpy(self.p_z).to(self.device)
+            p_z = self.p_z_tensor
 
             # Calculating the value target
-            reparam_actions, log_probs = self.policy_network.sample_or_likelihood(states)
-            q1 = self.q_value_network1(states, reparam_actions)
-            q2 = self.q_value_network2(states, reparam_actions)
-            q = torch.min(q1, q2)
-            target_value = q.detach() - self.config["alpha"] * log_probs.detach()
+            with torch.no_grad():
+                reparam_actions, log_probs = self.policy_network.sample_or_likelihood(states)
+                q1 = self.q_value_network1(states, reparam_actions)
+                q2 = self.q_value_network2(states, reparam_actions)
+                q = torch.min(q1, q2)
+                target_value = q.detach() - self.config["alpha"] * log_probs.detach()
 
             value = self.value_network(states)
             value_loss = self.mse_loss(value, target_value)
@@ -118,8 +125,18 @@ class SACAgent:
             q1_loss = self.mse_loss(q1, target_q)
             q2_loss = self.mse_loss(q2, target_q)
 
+            # 6. Recompute for policy loss (need gradients)
+            reparam_actions, log_probs = self.policy_network.sample_or_likelihood(states)
+            q = torch.min(
+                self.q_value_network1(states, reparam_actions),
+                self.q_value_network2(states, reparam_actions)
+            )
+
             policy_loss = (self.config["alpha"] * log_probs - q).mean()
-            logits = self.discriminator(embeddings)
+            
+            # why is it here twice?
+            # logits = self.discriminator(embeddings)
+            
             discriminator_loss = self.cross_ent_loss(logits, zs.squeeze(-1))
 
             self.policy_opt.zero_grad()

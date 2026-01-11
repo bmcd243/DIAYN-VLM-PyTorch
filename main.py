@@ -8,7 +8,14 @@ import os
 import torch
 import clip
 from PIL import Image
-os.environ["MUJOCO_GL"] = "egl" 
+from torch.amp import autocast
+from torch.amp.grad_scaler import GradScaler
+import wandb
+
+
+scaler = GradScaler('cuda')
+os.environ["MUJOCO_GL"] = "egl"
+
 print("CUDA available:", torch.cuda.is_available())
 print("Device count:", torch.cuda.device_count())
 print("Current device:", torch.cuda.current_device())
@@ -28,7 +35,7 @@ def get_semantic_embedding(env, clip_model, clip_preprocess, device):
     Ref: DIAYN_VLM_Algorithm.pdf [Source 7, 14]
     """
     # 1. Render frame (Pixel Observation)
-    frame = env.render(mode='rgb_array') 
+    frame = env.render() 
     
     # 2. Resize to 224x224 for CLIP
     image = Image.fromarray(frame).resize((224, 224))
@@ -46,15 +53,14 @@ def get_semantic_embedding(env, clip_model, clip_preprocess, device):
 if __name__ == "__main__":
     params = get_params()
 
-    # 1. CHANGE: Set Environment to HalfCheetah
-    params["env_name"] = "HalfCheetah-v3"
+    params["env_name"] = "HalfCheetah-v5"
 
-    # 2. ADD: Initialize Frozen CLIP Model (ViT-B/32)
-    # Ref: DIAYN_VLM_Algorithm.pdf [Source 12]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Loading CLIP Model...")
-    clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
+    clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
     clip_model.eval()
+
+    params["embedding_dim"] = 768
 
     test_env = gym.make(params["env_name"])
     n_states = test_env.observation_space.shape[0]
@@ -68,7 +74,6 @@ if __name__ == "__main__":
     test_env.close()
     del test_env, n_states, n_actions, action_bounds
 
-    # env = gym.make(params["env_name"])
     env = gym.make(params["env_name"], render_mode="rgb_array")
 
     p_z = np.full(params["n_skills"], 1 / params["n_skills"])
@@ -76,6 +81,14 @@ if __name__ == "__main__":
     logger = Logger(agent, **params)
 
     if params["do_train"]:
+
+        # Initialize wandb
+        wandb.init(
+            project="DIAYN-VLM",
+            name=f"HalfCheetah-ViT-L14-skills{params['n_skills']}",
+            config=params,
+            tags=["SAC", "DIAYN", "VLM", "HalfCheetah"]
+        )
 
         if not params["train_from_scratch"]:
             episode, last_logq_zs, np_rng_state, *env_rng_states, torch_rng_state, random_rng_state = logger.load_weights()
@@ -115,6 +128,7 @@ if __name__ == "__main__":
                 next_embedding = get_semantic_embedding(env, clip_model, clip_preprocess, device)
                 next_state = concat_state_latent(next_state, z, params["n_skills"])
                 agent.store(state, z, done, action, next_state, next_embedding)
+                # with autocast('cuda'):
                 logq_zs = agent.train()
                 if logq_zs is None:
                     logq_zses.append(last_logq_zs)
@@ -126,17 +140,29 @@ if __name__ == "__main__":
                 if done:
                     break
 
+            avg_logq_zs = sum(logq_zses) / len(logq_zses)
+            
+            # Log to wandb
+            wandb.log({
+                "episode": episode,
+                "episode_reward": episode_reward,
+                "skill_z": z,
+                "avg_logq_z": avg_logq_zs,
+                "episode_length": step,
+            })
+            
             logger.log(episode,
                        episode_reward,
                        z,
                        sum(logq_zses) / len(logq_zses),
                        step,
                        np.random.get_state(),
-                    #    env.np_random.get_state(),
-                    #    env.observation_space.np_random.get_state(),
-                    #    env.action_space.np_random.get_state(),
                        *agent.get_rng_states(),
                        )
+            last_logq_zs = avg_logq_zs
+        
+        # Finish wandb run
+        wandb.finish()
 
     else:
         logger.load_weights()

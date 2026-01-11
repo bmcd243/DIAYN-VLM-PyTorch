@@ -28,7 +28,8 @@ class Logger:
     def _create_wights_folder(dir):
         if not os.path.exists("Checkpoints"):
             os.mkdir("Checkpoints")
-        os.mkdir("Checkpoints/" + dir)
+        # os.mkdir("Checkpoints/" + dir)
+        os.makedirs("Checkpoints/" + dir, exist_ok=True)
 
     def _log_params(self):
         with SummaryWriter("Logs/" + self.log_dir) as writer:
@@ -109,10 +110,17 @@ class Logger:
                    "Checkpoints/" + self.log_dir + "/params.pth")
 
     def load_weights(self):
-        model_dir = glob.glob("Checkpoints/" + self.config["env_name"][:-3] + "/")
-        model_dir.sort()
-        checkpoint = torch.load(model_dir[-1] + "/params.pth")
-        self.log_dir = model_dir[-1].split(os.sep)[-1]
+        base_dir = "Checkpoints/" + self.config["env_name"][:-3] + "/"
+        # Find all subdirectories (timestamped runs)
+        subdirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+        if not subdirs:
+            raise FileNotFoundError(f"No checkpoints found in {base_dir}")
+        # Sort by modification time (latest last)
+        subdirs.sort(key=os.path.getmtime)
+        latest_dir = subdirs[-1]
+        checkpoint_path = os.path.join(latest_dir, "params.pth")
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        self.log_dir = latest_dir.split(os.sep)[-1]
         self.agent.policy_network.load_state_dict(checkpoint["policy_network_state_dict"])
         self.agent.q_value_network1.load_state_dict(checkpoint["q_value_network1_state_dict"])
         self.agent.q_value_network2.load_state_dict(checkpoint["q_value_network2_state_dict"])
