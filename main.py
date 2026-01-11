@@ -6,8 +6,6 @@ import numpy as np
 from tqdm import tqdm
 import os
 import torch
-import clip
-from PIL import Image
 os.environ["MUJOCO_GL"] = "egl" 
 print("CUDA available:", torch.cuda.is_available())
 print("Device count:", torch.cuda.device_count())
@@ -21,40 +19,8 @@ def concat_state_latent(s, z_, n):
     return np.concatenate([s, z_one_hot])
 
 
-
-def get_semantic_embedding(env, clip_model, clip_preprocess, device):
-    """
-    Captures a frame, preprocesses it for CLIP, and generates the embedding (e_t).
-    Ref: DIAYN_VLM_Algorithm.pdf [Source 7, 14]
-    """
-    # 1. Render frame (Pixel Observation)
-    frame = env.render(mode='rgb_array') 
-    
-    # 2. Resize to 224x224 for CLIP
-    image = Image.fromarray(frame).resize((224, 224))
-    
-    # 3. Encode using Frozen VLM
-    image_input = clip_preprocess(image).unsqueeze(0).to(device)
-    with torch.no_grad():
-        embedding = clip_model.encode_image(image_input)
-        
-    # Return 512-dim embedding as numpy array
-    return embedding.cpu().numpy()[0]
-
-
-
 if __name__ == "__main__":
     params = get_params()
-
-    # 1. CHANGE: Set Environment to HalfCheetah
-    params["env_name"] = "HalfCheetah-v3"
-
-    # 2. ADD: Initialize Frozen CLIP Model (ViT-B/32)
-    # Ref: DIAYN_VLM_Algorithm.pdf [Source 12]
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print("Loading CLIP Model...")
-    clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
-    clip_model.eval()
 
     test_env = gym.make(params["env_name"])
     n_states = test_env.observation_space.shape[0]
@@ -101,7 +67,6 @@ if __name__ == "__main__":
         for episode in tqdm(range(1 + min_episode, params["max_n_episodes"] + 1)):
             z = np.random.choice(params["n_skills"], p=p_z)
             state, _ = env.reset()
-            embedding = get_semantic_embedding(env, clip_model, clip_preprocess, device)
             state = concat_state_latent(state, z, params["n_skills"])
             episode_reward = 0
             logq_zses = []
@@ -112,9 +77,8 @@ if __name__ == "__main__":
                 action = agent.choose_action(state)
                 next_state, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
-                next_embedding = get_semantic_embedding(env, clip_model, clip_preprocess, device)
                 next_state = concat_state_latent(next_state, z, params["n_skills"])
-                agent.store(state, z, done, action, next_state, next_embedding)
+                agent.store(state, z, done, action, next_state)
                 logq_zs = agent.train()
                 if logq_zs is None:
                     logq_zses.append(last_logq_zs)
@@ -122,7 +86,6 @@ if __name__ == "__main__":
                     logq_zses.append(logq_zs)
                 episode_reward += reward
                 state = next_state
-                embedding = next_embedding
                 if done:
                     break
 
