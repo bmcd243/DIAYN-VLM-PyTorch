@@ -10,6 +10,7 @@ from torch.nn.functional import log_softmax
 class SACAgent:
     def __init__(self,
                  p_z,
+                 skill_embeddings=None,
                  **config):
         self.config = config
         self.n_states = self.config["n_states"]
@@ -40,7 +41,7 @@ class SACAgent:
                                                  n_hidden_filters=self.config["n_hiddens"]).to(self.device)
         self.hard_update_target_network()
 
-        self.discriminator = Discriminator(n_states=self.n_states, n_skills=self.n_skills,
+        self.discriminator = Discriminator(n_states=512, n_skills=self.n_skills,
                                            n_hidden_filters=self.config["n_hiddens"]).to(self.device)
 
         self.mse_loss = torch.nn.MSELoss()
@@ -52,19 +53,23 @@ class SACAgent:
         self.policy_opt = Adam(self.policy_network.parameters(), lr=self.config["lr"])
         self.discriminator_opt = Adam(self.discriminator.parameters(), lr=self.config["lr"])
 
+        self.skill_embeddings = torch.from_numpy(skill_embeddings).float().to(self.device)
+
     def choose_action(self, states):
         states = np.expand_dims(states, axis=0)
         states = from_numpy(states).float().to(self.device)
         action, _ = self.policy_network.sample_or_likelihood(states)
         return action.detach().cpu().numpy()[0]
 
-    def store(self, state, z, done, action, next_state):
+    def store(self, state, z, done, action, next_state, embedding):
         state = from_numpy(state).float().to("cpu")
         z = torch.ByteTensor([z]).to("cpu")
         done = torch.BoolTensor([done]).to("cpu")
         action = torch.Tensor([action]).to("cpu")
         next_state = from_numpy(next_state).float().to("cpu")
-        self.memory.add(state, z, done, action, next_state)
+        # Store embedding
+        embedding = from_numpy(embedding).float().to("cpu")
+        self.memory.add(state, z, done, action, next_state, embedding)
 
     def unpack(self, batch):
         batch = Transition(*zip(*batch))
@@ -74,15 +79,18 @@ class SACAgent:
         dones = torch.cat(batch.done).view(self.batch_size, 1).to(self.device)
         actions = torch.cat(batch.action).view(-1, self.config["n_actions"]).to(self.device)
         next_states = torch.cat(batch.next_state).view(self.batch_size, self.n_states + self.n_skills).to(self.device)
+        
+        # CHANGE: Unpack embeddings
+        embeddings = torch.cat(batch.embedding).view(self.batch_size, 512).to(self.device)
 
-        return states, zs, dones, actions, next_states
+        return states, zs, dones, actions, next_states, embeddings
 
     def train(self):
         if len(self.memory) < self.batch_size:
             return None
         else:
             batch = self.memory.sample(self.batch_size)
-            states, zs, dones, actions, next_states = self.unpack(batch)
+            states, zs, dones, actions, next_states, embeddings = self.unpack(batch)
             p_z = from_numpy(self.p_z).to(self.device)
 
             # Calculating the value target
@@ -95,9 +103,10 @@ class SACAgent:
             value = self.value_network(states)
             value_loss = self.mse_loss(value, target_value)
 
-            logits = self.discriminator(torch.split(next_states, [self.n_states, self.n_skills], dim=-1)[0])
+            logits = self.discriminator(embeddings)
             p_z = p_z.gather(-1, zs)
             logq_z_ns = log_softmax(logits, dim=-1)
+            # Intrinsic Reward: log q(z|e) - log p(z)
             rewards = logq_z_ns.gather(-1, zs).detach() - torch.log(p_z + 1e-6)
 
             # Calculating the Q-Value target
@@ -110,7 +119,7 @@ class SACAgent:
             q2_loss = self.mse_loss(q2, target_q)
 
             policy_loss = (self.config["alpha"] * log_probs - q).mean()
-            logits = self.discriminator(torch.split(states, [self.n_states, self.n_skills], dim=-1)[0])
+            logits = self.discriminator(embeddings)
             discriminator_loss = self.cross_ent_loss(logits, zs.squeeze(-1))
 
             self.policy_opt.zero_grad()
