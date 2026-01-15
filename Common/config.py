@@ -25,6 +25,12 @@ def get_params():
     parser.add_argument("--config", type=str, default=None,
                         help="Path to YAML config file (e.g., configs/halfcheetah_vit_l14.yaml)")
 
+    # Checkpoint
+    parser.add_argument("--checkpoint_path", default=None, type=str,
+                    help="Specific checkpoint path to load (e.g., Checkpoints/HalfCheetah/halfcheetah_vit_l14_2026-01-11-18-15-22/params.pth)")
+    parser.add_argument("--checkpoint_dir", default=None, type=str,
+                    help="Load latest checkpoint from specific run directory (e.g., Checkpoints/HalfCheetah/halfcheetah_vit_l14_2026-01-11-18-15-22)")
+
     # Environment
     parser.add_argument("--env_name", default=None, type=str, help="Name of the environment.")
     parser.add_argument("--seed", default=None, type=int, help="Random seed.")
@@ -67,6 +73,28 @@ def get_params():
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging.")
     parser.add_argument("--wandb_project", default=None, type=str, help="W&B project name.")
     parser.add_argument("--wandb_entity", default=None, type=str, help="W&B entity (username/team).")
+
+    parser.add_argument("--eval_episodes", default=3, type=int,
+                    help="Number of episodes to run per skill during evaluation")
+    parser.add_argument("--save_eval_video", action="store_true",
+                        help="Save videos during evaluation")
+    parser.add_argument("--no_eval_video", dest="save_eval_video", action="store_false",
+                        help="Don't save videos during evaluation (faster)")
+    parser.set_defaults(save_eval_video=True)
+
+    parser.add_argument("--no_augmentation", dest="use_augmentation", action="store_false",
+                    help="Disable image augmentation in preprocessing")
+    parser.set_defaults(use_augmentation=True)
+
+
+    # Video parameters
+
+    parser.add_argument("--video_width", default=480, type=int,
+                    help="Width of individual skill videos")
+    parser.add_argument("--video_height", default=480, type=int,
+                        help="Height of individual skill videos")
+    parser.add_argument("--collage_size", default=200, type=int,
+                        help="Size of each skill in collage grid (square)")
 
     args = parser.parse_args()
 

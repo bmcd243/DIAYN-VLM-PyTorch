@@ -2,6 +2,7 @@
 import gymnasium as gym
 from Brain import SACAgent
 from Common import Play, Logger, get_params
+from Common.preprocessing import VLMRMPreprocessor
 import numpy as np
 from tqdm import tqdm
 import os
@@ -11,6 +12,8 @@ from PIL import Image
 from torch.amp import autocast
 from torch.amp.grad_scaler import GradScaler
 import wandb
+import sys
+import envs
 
 
 scaler = GradScaler('cuda')
@@ -29,23 +32,23 @@ def concat_state_latent(s, z_, n):
 
 
 
-def get_semantic_embedding(env, clip_model, clip_preprocess, device):
+def get_semantic_embedding(env, clip_model, preprocessor, device):
     """
-    Captures a frame, preprocesses it for CLIP, and generates the embedding (e_t).
+    Captures a frame, preprocesses it for CLIP with VLM-RM style augmentation, and generates the embedding (e_t).
     Ref: DIAYN_VLM_Algorithm.pdf [Source 7, 14]
     """
     # 1. Render frame (Pixel Observation)
     frame = env.render() 
     
-    # 2. Resize to 224x224 for CLIP
-    image = Image.fromarray(frame).resize((224, 224))
+    # 2. Preprocess with augmentations (VLM-RM style)
+    image_input = preprocessor.preprocess_frame(frame).unsqueeze(0).to(device)
     
     # 3. Encode using Frozen VLM
-    image_input = clip_preprocess(image).unsqueeze(0).to(device)
     with torch.no_grad():
         embedding = clip_model.encode_image(image_input)
+        embedding = embedding / embedding.norm(dim=-1, keepdim=True)
         
-    # Return 512-dim embedding as numpy array
+    # Return embedding as numpy array
     return embedding.cpu().numpy()[0]
 
 
@@ -53,29 +56,61 @@ def get_semantic_embedding(env, clip_model, clip_preprocess, device):
 if __name__ == "__main__":
     params = get_params()
 
-    params["env_name"] = "HalfCheetah-v5"
+    # Handle checkpoint loading
+    if (params.get("checkpoint_path") or params.get("checkpoint_dir")) and "do_train" not in sys.argv:
+        params["do_train"] = False
+        print("Checkpoint specified without --do_train flag, switching to evaluation mode")
 
+    if not params["do_train"] and (params.get("checkpoint_dir") or params.get("checkpoint_path")):
+        if params.get("checkpoint_dir"):
+            ckpt_path = os.path.join(params["checkpoint_dir"], "params.pth")
+        else:
+            ckpt_path = params["checkpoint_path"]
+        
+        checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        
+        if "hyperparameters" in checkpoint:
+            print("Loading hyperparameters from checkpoint...")
+            for key, value in checkpoint["hyperparameters"].items():
+                params[key] = value
+                print(f"  {key} = {value}")
+        else:
+            print("Warning: Old checkpoint format, trying to load from config.txt...")
+    
+    # Setup CLIP
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Loading CLIP Model...")
     clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
     clip_model.eval()
-
+    
+    preprocessor = VLMRMPreprocessor(clip_preprocess, augment=params.get("use_augmentation", True))
+    print(f"Using VLMRMPreprocessor with augmentation={preprocessor.augment}")
     params["embedding_dim"] = 768
 
-    test_env = gym.make(params["env_name"])
-    n_states = test_env.observation_space.shape[0]
-    n_actions = test_env.action_space.shape[0]
-    action_bounds = [test_env.action_space.low[0], test_env.action_space.high[0]]
+    # Create environment (SINGLE INSTANCE)
+    if params["env_name"] == "TexturedHumanoid-v5":
+        env = gym.make(
+            params["env_name"],
+            render_mode="rgb_array",
+            terminate_when_unhealthy=params.get("terminate_when_unhealthy", True),
+            healthy_z_range=tuple(params.get("healthy_z_range", [1.0, 2.0])),
+            reset_noise_scale=params.get("reset_noise_scale", 0.005)
+        )
+        print(f"TexturedHumanoid params: terminate_when_unhealthy={params.get('terminate_when_unhealthy')}, "
+              f"healthy_z_range={params.get('healthy_z_range')}, "
+              f"reset_noise_scale={params.get('reset_noise_scale')}")
+    else:
+        env = gym.make(params["env_name"], render_mode="rgb_array")
 
-    params.update({"n_states": n_states,
-                   "n_actions": n_actions,
-                   "action_bounds": action_bounds})
+    # Extract environment specs
+    params.update({
+        "n_states": env.observation_space.shape[0],
+        "n_actions": env.action_space.shape[0],
+        "action_bounds": [env.action_space.low[0], env.action_space.high[0]]
+    })
     print("params:", params)
-    test_env.close()
-    del test_env, n_states, n_actions, action_bounds
 
-    env = gym.make(params["env_name"], render_mode="rgb_array")
-
+    # Initialize agent and logger
     p_z = np.full(params["n_skills"], 1 / params["n_skills"])
     agent = SACAgent(p_z=p_z, **params)
     logger = Logger(agent, **params)
@@ -85,9 +120,9 @@ if __name__ == "__main__":
         # Initialize wandb
         wandb.init(
             project="DIAYN-VLM",
-            name=f"HalfCheetah-ViT-L14-skills{params['n_skills']}",
-            config=params,
-            tags=["SAC", "DIAYN", "VLM", "HalfCheetah"]
+            name=f"{params['config_name']}{params['n_skills']}",
+            config=params
+            # tags=["SAC", "DIAYN", "VLM", "HalfCheetah"]
         )
 
         if not params["train_from_scratch"]:
@@ -114,10 +149,12 @@ if __name__ == "__main__":
         for episode in tqdm(range(1 + min_episode, params["max_n_episodes"] + 1)):
             z = np.random.choice(params["n_skills"], p=p_z)
             state, _ = env.reset()
-            embedding = get_semantic_embedding(env, clip_model, clip_preprocess, device)
+            embedding = get_semantic_embedding(env, clip_model, preprocessor, device)
             state = concat_state_latent(state, z, params["n_skills"])
             episode_reward = 0
             logq_zses = []
+
+            embedding_freq = params.get("embedding_freq", 1)
 
             max_n_steps = min(params["max_episode_len"], env.spec.max_episode_steps)
             for step in range(1, 1 + max_n_steps):
@@ -125,7 +162,13 @@ if __name__ == "__main__":
                 action = agent.choose_action(state)
                 next_state, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
-                next_embedding = get_semantic_embedding(env, clip_model, clip_preprocess, device)
+
+                # SPEEDUP: Only compute embedding every N steps or on done
+                if step % embedding_freq == 0 or done:
+                    next_embedding = get_semantic_embedding(env, clip_model, preprocessor, device)
+                else:
+                    next_embedding = embedding  # Reuse previous embedding
+                    
                 next_state = concat_state_latent(next_state, z, params["n_skills"])
                 agent.store(state, z, done, action, next_state, next_embedding)
                 # with autocast('cuda'):
@@ -165,6 +208,28 @@ if __name__ == "__main__":
         wandb.finish()
 
     else:
-        logger.load_weights()
-        player = Play(env, agent, n_skills=params["n_skills"])
-        player.evaluate()
+        # Evaluation mode
+        print("="*50)
+        print("EVALUATION MODE")
+        print("="*50)
+        
+        # Load weights with optional specific checkpoint
+        logger.load_weights(
+            checkpoint_path=params.get("checkpoint_path"),
+            checkpoint_dir=params.get("checkpoint_dir")
+        )
+        
+        # Print which checkpoint was loaded
+        print(f"Loaded checkpoint from: {logger.log_dir}")
+        print("="*50)
+        
+        # Pass log_dir to Play for better video naming
+        player = Play(env, agent, n_skills=params["n_skills"], 
+                     log_dir=logger.log_dir,
+                     config_name=params.get("config"))
+        
+        # Evaluate with multiple episodes per skill for better statistics
+        skill_rewards = player.evaluate(
+            num_episodes_per_skill=params.get("eval_episodes", 3),
+            save_video=params.get("save_eval_video", True)
+        )

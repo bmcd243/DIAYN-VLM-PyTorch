@@ -1,6 +1,8 @@
 # High-quality training configuration with ViT-L/14
 # Better embeddings but slower training
 
+config_name: "halfcheetah_vit_l14"
+
 env_name: "HalfCheetah-v5"
 seed: 123
 
@@ -9,6 +11,7 @@ do_train: true
 train_from_scratch: true
 max_n_episodes: 5000
 interval: 100
+max_episode_len: 1000
 
 # DIAYN
 n_skills: 20
@@ -23,7 +26,7 @@ clip_model: "ViT-L/14"
 embedding_dim: 768  # ViT-L produces 768-dim embeddings
 
 # Optimization
-embedding_freq: 4  # Must use this with ViT-L/14 for reasonable speed
+embedding_freq: 10  # Must use this with ViT-L/14 for reasonable speed
 
 # Logging
 use_wandb: true

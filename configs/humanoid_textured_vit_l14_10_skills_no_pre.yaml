@@ -1,0 +1,45 @@
+# VLM-RM style Humanoid with textured environment and visual diversity
+
+config_name: "humanoid_textured_vit_l14_10_skills_no_pre"
+
+# Environment
+env_name: "TexturedHumanoid-v5"
+seed: 123
+
+# Humanoid-specific parameters (make training easier)
+terminate_when_unhealthy: false  # Don't terminate when falling
+healthy_z_range: [0.5, 3.0]      # More permissive height range (default: [1.0, 2.0])
+reset_noise_scale: 0.01          # More stable initial poses (default: 0.005)
+
+# CLIP Model
+clip_model: "ViT-L/14"
+embedding_dim: 768
+embedding_freq: 4  # Compute embedding every 4 steps
+
+# Training (Humanoid is harder, needs more training)
+do_train: true
+train_from_scratch: true
+max_n_episodes: 10000
+max_episode_len: 1000
+batch_size: 512
+lr: 0.0001  # Lower learning rate for stability
+
+# Skills
+n_skills: 10  # More skills for complex humanoid behaviors
+
+# Rewards
+reward_scale: 1
+gamma: 0.99
+alpha: 0.1
+tau: 0.005
+
+# Memory
+mem_size: 1000000  # Larger buffer for humanoid
+
+# Network
+n_hiddens: 512  # Larger networks for complex environment
+
+# Logging
+interval: 200
+use_wandb: true
+wandb_project: "DIAYN-VLM-Humanoid"
