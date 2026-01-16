@@ -8,6 +8,7 @@ from tqdm import tqdm
 import os
 import torch
 import clip
+from transformers import CLIPProcessor, CLIPModel
 from PIL import Image
 from torch.amp import autocast
 from torch.amp.grad_scaler import GradScaler
@@ -32,24 +33,19 @@ def concat_state_latent(s, z_, n):
 
 
 
-def get_semantic_embedding(env, clip_model, preprocessor, device):
+def get_semantic_embedding(env, clip_model, clip_processor, device):
     """
     Captures a frame, preprocesses it for CLIP with VLM-RM style augmentation, and generates the embedding (e_t).
     Ref: DIAYN_VLM_Algorithm.pdf [Source 7, 14]
     """
-    # 1. Render frame (Pixel Observation)
-    frame = env.render() 
-    
-    # 2. Preprocess with augmentations (VLM-RM style)
-    image_input = preprocessor.preprocess_frame(frame).unsqueeze(0).to(device)
-    
-    # 3. Encode using Frozen VLM
+    frame = env.render()
+    image = Image.fromarray(frame)
+    inputs = clip_processor(images=image, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
-        embedding = clip_model.encode_image(image_input)
-        embedding = embedding / embedding.norm(dim=-1, keepdim=True)
-        
-    # Return embedding as numpy array
-    return embedding.cpu().numpy()[0]
+        image_embeds = clip_model.get_image_features(**inputs)
+        image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)
+    return image_embeds.cpu().numpy()[0]
 
 
 
@@ -80,11 +76,16 @@ if __name__ == "__main__":
     # Setup CLIP
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Loading CLIP Model...")
-    clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
+    # clip_model, clip_preprocess = clip.load(params["clip_model"], device=device)
+    clip_model = CLIPModel.from_pretrained(params["clip_model"]).to(device)
+    clip_processor = CLIPProcessor.from_pretrained(params["clip_model"])
+    print(f"Loaded{params["clip_model"]}")
     clip_model.eval()
     
-    preprocessor = VLMRMPreprocessor(clip_preprocess, augment=params.get("use_augmentation", True))
-    print(f"Using VLMRMPreprocessor with augmentation={preprocessor.augment}")
+    # preprocessor = VLMRMPreprocessor(clip_processor, augment=params.get("use_augmentation", True))
+    # print(f"Using VLMRMPreprocessor with augmentation={preprocessor.augment}")
+    preprocessor = clip_processor  # Use clip_processor directly
+    print(f"Using CLIPProcessor directly (no augmentation)")
     params["embedding_dim"] = 768
 
     # Create environment (SINGLE INSTANCE)
@@ -110,9 +111,46 @@ if __name__ == "__main__":
     })
     print("params:", params)
 
+    target_embedding = None
+    if params["reward_mode"] == "vlm_rm":
+        print(f"\n[VLM-RM MODE ACTIVE]")
+        print(f"Target Prompt: '{params['target_prompt']}'")
+        
+        # 1. Encode Goal
+        goal_inputs = clip_processor(text=[params["target_prompt"]], return_tensors="pt", padding=True)
+        goal_inputs = {k: v.to(device) for k, v in goal_inputs.items()}
+        with torch.no_grad():
+            goal_emb = clip_model.get_text_features(**goal_inputs)
+            goal_emb = goal_emb / goal_emb.norm(dim=-1, keepdim=True)
+        
+        # 2. Check if baseline prompt exists, if so compute direction vector
+        if "baseline_prompt" in params and params["baseline_prompt"]:
+            print(f"Baseline Prompt: '{params['baseline_prompt']}'")
+            print("[Using Direction Vector: Baseline -> Goal]")
+            
+            # Encode Baseline
+            base_inputs = clip_processor(text=[params["baseline_prompt"]], return_tensors="pt", padding=True)
+            base_inputs = {k: v.to(device) for k, v in base_inputs.items()}
+            with torch.no_grad():
+                base_emb = clip_model.get_text_features(**base_inputs)
+                base_emb = base_emb / base_emb.norm(dim=-1, keepdim=True)
+            
+            # 3. Compute Direction (The "Delta")
+            # VLM-RM Idea: Reward movement along the vector from Baseline -> Goal
+            direction_vector = goal_emb - base_emb
+            direction_vector = direction_vector / direction_vector.norm(dim=-1, keepdim=True)
+            
+            target_embedding = direction_vector.cpu().numpy()[0]
+            
+            print(f"Direction vector norm: {np.linalg.norm(target_embedding):.4f}")
+        else:
+            # Use goal embedding directly (original behavior)
+            print("[Using Goal Embedding directly (no baseline)]")
+            target_embedding = goal_emb.cpu().numpy()[0]
+
     # Initialize agent and logger
     p_z = np.full(params["n_skills"], 1 / params["n_skills"])
-    agent = SACAgent(p_z=p_z, **params)
+    agent = SACAgent(p_z=p_z, target_embedding=target_embedding, **params)
     logger = Logger(agent, **params)
 
     if params["do_train"]:
@@ -120,9 +158,8 @@ if __name__ == "__main__":
         # Initialize wandb
         wandb.init(
             project="DIAYN-VLM",
-            name=f"{params['config_name']}{params['n_skills']}",
-            config=params
-            # tags=["SAC", "DIAYN", "VLM", "HalfCheetah"]
+            name=f"{params['config_name']}",
+            tags=[params['reward_mode'], params['env_name']]
         )
 
         if not params["train_from_scratch"]:

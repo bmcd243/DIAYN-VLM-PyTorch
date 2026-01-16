@@ -10,6 +10,7 @@ from torch.nn.functional import log_softmax
 class SACAgent:
     def __init__(self,
                  p_z,
+                 target_embedding=None,
                  **config):
         self.config = config
         self.n_states = self.config["n_states"]
@@ -18,6 +19,12 @@ class SACAgent:
         self.p_z = np.tile(p_z, self.batch_size).reshape(self.batch_size, self.n_skills)
         self.memory = Memory(self.config["mem_size"], self.config["seed"])
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.reward_mode = self.config.get("reward_mode", "diayn")
+        if self.reward_mode == "vlm_rm":
+            if target_embedding is None:
+                raise ValueError("VLM-RM mode requires a target_embedding!")
+            # Register as buffer so it moves to device automatically if you saved the model
+            self.target_embedding = torch.from_numpy(target_embedding).float().to(self.device)
 
         torch.manual_seed(self.config["seed"])
         # 1. Enable cuDNN autotuner for faster convolutions
@@ -102,6 +109,11 @@ class SACAgent:
             # Calculating the value target
             with torch.no_grad():
                 reparam_actions, log_probs = self.policy_network.sample_or_likelihood(states)
+                
+                if log_probs.dim() > 1:
+                    log_probs = log_probs.sum(dim=1, keepdim=True)
+                
+                
                 q1 = self.q_value_network1(states, reparam_actions)
                 q2 = self.q_value_network2(states, reparam_actions)
                 q = torch.min(q1, q2)
@@ -110,11 +122,30 @@ class SACAgent:
             value = self.value_network(states)
             value_loss = self.mse_loss(value, target_value)
 
-            logits = self.discriminator(embeddings)
-            p_z = p_z.gather(-1, zs)
-            logq_z_ns = log_softmax(logits, dim=-1)
-            # Intrinsic Reward: log q(z|e) - log p(z)
-            rewards = logq_z_ns.gather(-1, zs).detach() - torch.log(p_z + 1e-6)
+            if self.reward_mode == "vlm_rm":
+                # VLM-RM Reward: Cosine Similarity(State, Text)
+                # embeddings are (Batch, 768), target is (768,)
+                # Since 'get_semantic_embedding' in main.py already normalized the images,
+                # and we normalized text in main.py, dot product IS cosine similarity.
+                
+                # Result shape: (Batch,)
+                rewards = torch.matmul(embeddings, self.target_embedding)
+
+                # Reshape from (Batch,) to (Batch, 1)
+                rewards = rewards.unsqueeze(1)
+                
+                # Optional: Scale reward for SAC stability (CosSim is small: -1 to 1)
+                # You might want to tune this scaling factor (e.g. *10 or *20)
+                rewards = rewards * self.config.get("reward_scale", 1.0)
+                
+                # Detach to ensure no gradients flow back into CLIP (though CLIP is frozen anyway)
+                rewards = rewards.detach()
+                
+            else:
+                # DIAYN Reward: Discriminator Confidence
+                logits = self.discriminator(embeddings)
+                logq_z_ns = log_softmax(logits, dim=-1)
+                rewards = logq_z_ns.gather(-1, zs).detach() - torch.log(p_z + 1e-6)
 
             # Calculating the Q-Value target
             with torch.no_grad():
@@ -127,6 +158,10 @@ class SACAgent:
 
             # 6. Recompute for policy loss (need gradients)
             reparam_actions, log_probs = self.policy_network.sample_or_likelihood(states)
+            
+            if log_probs.dim() > 1:
+                log_probs = log_probs.sum(dim=1, keepdim=True)
+            
             q = torch.min(
                 self.q_value_network1(states, reparam_actions),
                 self.q_value_network2(states, reparam_actions)
@@ -134,10 +169,7 @@ class SACAgent:
 
             policy_loss = (self.config["alpha"] * log_probs - q).mean()
             
-            # why is it here twice?
-            # logits = self.discriminator(embeddings)
-            
-            discriminator_loss = self.cross_ent_loss(logits, zs.squeeze(-1))
+
 
             self.policy_opt.zero_grad()
             policy_loss.backward()
@@ -155,9 +187,16 @@ class SACAgent:
             q2_loss.backward()
             self.q_value2_opt.step()
 
-            self.discriminator_opt.zero_grad()
-            discriminator_loss.backward()
-            self.discriminator_opt.step()
+            discriminator_loss = torch.tensor(0.0).to(self.device)
+
+            if self.reward_mode == "diayn":
+                # Re-run logits if needed for gradient graph, or reuse if graph allows
+                logits = self.discriminator(embeddings) 
+                discriminator_loss = self.cross_ent_loss(logits, zs.squeeze(-1))
+
+                self.discriminator_opt.zero_grad()
+                discriminator_loss.backward()
+                self.discriminator_opt.step()
 
             self.soft_update_target_network(self.value_network, self.value_target_network)
 

@@ -25,6 +25,18 @@ def get_params():
     parser.add_argument("--config", type=str, default=None,
                         help="Path to YAML config file (e.g., configs/halfcheetah_vit_l14.yaml)")
 
+    # VLM-RM / Reward Configuration
+    parser.add_argument("--reward_mode", default="diayn", type=str, choices=["diayn", "vlm_rm"],
+                        help="Choose 'diayn' for skill discovery or 'vlm_rm' for prompted goal following.")
+    parser.add_argument("--target_prompt", default="A humanoid robot kneeling", type=str,
+                        help="The text description for VLM-RM mode (e.g. 'A robot running').")
+    
+    parser.add_argument("--baseline_prompt", default="A humanoid robot", type=str, 
+                    help="Neutral description for Goal-Baseline Regularization.")
+    
+    parser.add_argument("--config_name", default="unknown-run", type=str,
+                        help="Config name for wandb.")
+    
     # Checkpoint
     parser.add_argument("--checkpoint_path", default=None, type=str,
                     help="Specific checkpoint path to load (e.g., Checkpoints/HalfCheetah/halfcheetah_vit_l14_2026-01-11-18-15-22/params.pth)")
