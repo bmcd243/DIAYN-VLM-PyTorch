@@ -5,17 +5,13 @@ from gymnasium.envs.mujoco.humanoid_v5 import HumanoidEnv
 
 class TexturedHumanoidEnv(HumanoidEnv):
     def __init__(self, 
+                 camera_name="fixed_front",  # Default to fixed_front
                  terminate_when_unhealthy=True,
                  healthy_z_range=(1.0, 2.0),
-                 reset_noise_scale=0.005,
+                 reset_noise_scale=0.01, # Increased from 0.005 to 0.01 (standard)
                  **kwargs):
         """
         Textured humanoid with configurable termination conditions
-        
-        Args:
-            terminate_when_unhealthy: Whether to terminate on unhealthy states
-            healthy_z_range: Acceptable z-coordinate range for torso
-            reset_noise_scale: Scale of noise added to initial state
         """
         # Store custom parameters
         self._terminate_when_unhealthy = terminate_when_unhealthy
@@ -25,8 +21,10 @@ class TexturedHumanoidEnv(HumanoidEnv):
         # Call parent with custom XML
         current_dir = os.path.dirname(os.path.abspath(__file__))
         xml_file = os.path.join(current_dir, "..", "assets", "mujoco", "humanoid_textured.xml")
+        
         super().__init__(
             xml_file=xml_file,
+            camera_name=camera_name,
             terminate_when_unhealthy=terminate_when_unhealthy,
             healthy_z_range=healthy_z_range,
             reset_noise_scale=reset_noise_scale,

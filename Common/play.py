@@ -71,7 +71,6 @@ class Play:
                 video_writer = None
                 if save_video and episode == 0:
                     video_path = os.path.join(self.video_dir, f"skill_{z:02d}.mp4")
-                    # CHANGED: Use configurable video_size instead of hardcoded (250, 250)
                     video_writer = cv2.VideoWriter(video_path, self.fourcc, 50.0, video_size)
                 
                 s, _ = self.env.reset()

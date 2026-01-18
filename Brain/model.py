@@ -26,6 +26,7 @@ class Discriminator(nn.Module, ABC):
         init_weight(self.hidden2)
         self.hidden2.bias.data.zero_()
         self.q = nn.Linear(in_features=self.n_hidden_filters, out_features=self.n_skills)
+        # self.q = nn.Linear(in_features=self.n_hidden_filters, out_features=self.n_skills, bias=False)
         init_weight(self.q, initializer="xavier uniform")
         self.q.bias.data.zero_()
 
